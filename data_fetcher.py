@@ -30,10 +30,10 @@ class PolygonFetcher:
     # ------------------------------------------------------------------ #
     # Screener core: get all gainers under $1                             #
     # ------------------------------------------------------------------ #
-    def get_gainers_snapshot(self, max_price: float = 1.00) -> list[dict]:
+    def get_gainers_snapshot(self, min_price: float = 2.00, max_price: float = 20.00) -> list[dict]:
         """
         Fetch top gainers snapshot from Polygon.
-        Filters to stocks under max_price.
+        Filters to stocks within min_price and max_price (Ross Cameron default: $2-$20).
         Note: Free tier has a slight delay on snapshot data.
         """
         data = self._get("/v2/snapshot/locale/us/markets/stocks/gainers")
@@ -44,7 +44,7 @@ class PolygonFetcher:
             prev = t.get("prevDay", {})
             last = t.get("lastTrade", {})
             price = last.get("p") or day.get("c") or 0
-            if price <= 0 or price > max_price:
+            if price <= 0 or price < min_price or price > max_price:
                 continue
             prev_close = prev.get("c") or 1
             pct_chg = ((price - prev_close) / prev_close * 100) if prev_close else 0
@@ -175,7 +175,8 @@ class PolygonFetcher:
 
     def screen(
         self,
-        max_price: float = 1.00,
+        min_price: float = 2.00,
+        max_price: float = 20.00,
         min_avg_vol_k: int = 500,
         min_surge: float = 3.0,
         min_chg_pct: float = 5.0,
@@ -192,7 +193,7 @@ class PolygonFetcher:
         Returns a DataFrame of the top N stocks ranked by dollar volume.
         """
         # Step 1: gainers snapshot
-        candidates = self.get_gainers_snapshot(max_price=max_price)
+        candidates = self.get_gainers_snapshot(min_price=min_price, max_price=max_price)
 
         # Step 2: volume filters (no extra API calls needed)
         filtered = []

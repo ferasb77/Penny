@@ -193,7 +193,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("## 📊 Screener Filters")
 
-    max_price = st.slider("Max Price ($)", 0.10, 1.00, 1.00, 0.05)
+    min_price, max_price = st.select_slider(
+        "Price Range ($) — Ross ideal: $2–$20",
+        options=[0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 50],
+        value=(2, 20),
+    )
     min_vol_k = st.slider("Min Avg Volume (K)", 100, 2000, 500, 100)
     min_surge = st.slider("Min Volume Surge (×)", 1.5, 10.0, 3.0, 0.5)
     min_chg = st.slider("Min % Change", 1, 50, 5, 1)
@@ -281,6 +285,7 @@ with tab_screener:
             with st.spinner("Scanning market…"):
                 try:
                     df = fetcher.screen(
+                        min_price=min_price,
                         max_price=max_price,
                         min_avg_vol_k=min_vol_k,
                         min_surge=min_surge,
