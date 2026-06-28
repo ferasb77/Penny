@@ -87,6 +87,47 @@ BREAK IT: accept the loss, reset to 1/4 size, A-setups only
 - Adding to losing positions
 - C-quality setups in a cold market
 
+## POSITION EXIT DECISION FRAMEWORK
+When asked about an open position, apply ALL of these rules in order to produce a verdict:
+
+### HARD EXIT SIGNALS (close immediately, no debate):
+- Stop price hit or breached — exit now, no hoping
+- RSI > 80 — momentum exhaustion, overbought, close at minimum 50% of position
+- Long upper wick candle forming (price spiked but closed near open) — distribution signal, exit
+- Stock fading below VWAP with increasing volume — buyers leaving, exit
+- Day 3 of the move — DO NOT hold, exit any remaining position now
+
+### SCALE-OUT SIGNALS (partial close, trail the rest):
+- 2:1 profit target reached — take 50% off, move stop to breakeven on the rest
+- 3:1 reached — take another 25% off, trail stop tightly
+- Time approaching 11:00 AM — tighten stop to within 5 cents, prepare to exit
+- Stock pausing at prior resistance (yesterday's high, round number) — take partial profit
+
+### ADD-TO-WINNER SIGNALS (only after cushion is built):
+- Price holding above VWAP after a healthy pullback
+- Volume coming back in on the next push
+- Day 1 of the move only (never add on Day 2 or 3)
+- Cushion already built for the day (25% of daily goal already banked)
+- When adding: double the position, immediately move stop to breakeven on full position
+
+### HOLD SIGNALS (stay in, let it run):
+- Price still above VWAP and holding
+- Volume still increasing on each push
+- RSI between 50-70 (healthy momentum range)
+- Time before 11:00 AM (still in prime trading window)
+- Target not yet reached
+- Day 1 of the move
+
+### EXIT VERDICT FORMAT:
+Always respond with one of:
+- CLOSE NOW — [specific reason] — exit at market
+- SCALE OUT 50% — [reason] — sell half, move stop to breakeven
+- ADD TO WINNER — [reason] — double size, stop to breakeven
+- HOLD — [reason] — stay in, next target $X.XX
+- TRAIL STOP — move stop to $X.XX — [reason]
+
+Always include: current unrealized P&L, % toward 2:1 target, time risk, and slippage-adjusted net if they close now.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 YOUR ROLE AS ANALYST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -214,6 +255,71 @@ TOOLS = [
                     )
                 },
                 required=["ticker", "entry_price", "stop_price", "target_price"]
+            )
+        ),
+
+        genai.protos.FunctionDeclaration(
+            name="recommend_exit",
+            description=(
+                "Analyze an open position and recommend whether to CLOSE, SCALE OUT, ADD TO WINNER, "
+                "HOLD, or TRAIL STOP. Fetches live price, RSI, VWAP, volume, and day-of-move data. "
+                "Applies Ross Cameron exit rules plus the three refinements: slippage-adjusted net P&L, "
+                "time-bucket risk, and day-of-move discipline."
+            ),
+            parameters=genai.protos.Schema(
+                type=genai.protos.Type.OBJECT,
+                properties={
+                    "ticker": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="Stock ticker symbol of the open position"
+                    ),
+                    "entry_price": genai.protos.Schema(
+                        type=genai.protos.Type.NUMBER,
+                        description="Your entry price for the position"
+                    ),
+                    "shares": genai.protos.Schema(
+                        type=genai.protos.Type.INTEGER,
+                        description="Number of shares currently held"
+                    ),
+                    "stop_price": genai.protos.Schema(
+                        type=genai.protos.Type.NUMBER,
+                        description="Your current stop loss price"
+                    ),
+                    "target_price": genai.protos.Schema(
+                        type=genai.protos.Type.NUMBER,
+                        description="Your original profit target (high of day or prior resistance)"
+                    ),
+                    "current_price": genai.protos.Schema(
+                        type=genai.protos.Type.NUMBER,
+                        description="The current market price (as of right now)"
+                    ),
+                    "entry_time": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="Time you entered the trade HH:MM (e.g. 09:45)"
+                    ),
+                    "current_time": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="Current time HH:MM (e.g. 10:32)"
+                    ),
+                    "day_of_move": genai.protos.Schema(
+                        type=genai.protos.Type.INTEGER,
+                        description="Which day of the move this stock is on (1, 2, or 3)"
+                    ),
+                    "direction": genai.protos.Schema(
+                        type=genai.protos.Type.STRING,
+                        description="LONG or SHORT"
+                    ),
+                    "slippage_per_share": genai.protos.Schema(
+                        type=genai.protos.Type.NUMBER,
+                        description="Slippage cost per share in dollars (e.g. 0.02 for 2 cents). Default 0.02."
+                    ),
+                    "cushion_built": genai.protos.Schema(
+                        type=genai.protos.Type.BOOLEAN,
+                        description="Has the daily profit cushion (25% of daily goal) already been reached today?"
+                    ),
+                },
+                required=["ticker", "entry_price", "shares", "stop_price",
+                          "target_price", "current_price"]
             )
         ),
 
@@ -462,6 +568,230 @@ class TradingAgent:
                     ),
                     "sizing_scenarios": sizing_table,
                     "reminder": "Always start at 1/4 size until cushion is built."
+                }, default=str)
+
+            elif tool_name == "recommend_exit":
+                ticker         = tool_input["ticker"].upper()
+                entry          = float(tool_input["entry_price"])
+                shares         = int(tool_input["shares"])
+                stop           = float(tool_input["stop_price"])
+                target         = float(tool_input["target_price"])
+                current        = float(tool_input["current_price"])
+                direction      = tool_input.get("direction", "LONG").upper()
+                current_time   = tool_input.get("current_time", "")
+                day_of_move    = int(tool_input.get("day_of_move", 1))
+                slip           = float(tool_input.get("slippage_per_share", 0.02))
+                cushion_built  = bool(tool_input.get("cushion_built", False))
+
+                # Core P&L calculations
+                if direction == "LONG":
+                    gross_pnl   = (current - entry) * shares
+                    pnl_per_sh  = current - entry
+                    risk_per_sh = entry - stop
+                    rwd_per_sh  = target - entry
+                    stop_hit    = current <= stop
+                    target_hit  = current >= target
+                else:
+                    gross_pnl   = (entry - current) * shares
+                    pnl_per_sh  = entry - current
+                    risk_per_sh = stop - entry
+                    rwd_per_sh  = entry - target
+                    stop_hit    = current >= stop
+                    target_hit  = current <= target
+
+                slip_cost       = slip * shares * 2   # entry already paid, exit still pending
+                net_pnl_if_close = gross_pnl - slip_cost
+                pnl_pct          = (gross_pnl / (entry * shares) * 100) if entry > 0 else 0
+                progress_to_target = (pnl_per_sh / rwd_per_sh * 100) if rwd_per_sh > 0 else 0
+                achieved_pl      = pnl_per_sh / risk_per_sh if risk_per_sh > 0 else 0
+
+                # Time risk assessment
+                time_risk = "LOW"
+                time_warning = ""
+                if current_time:
+                    try:
+                        h, m = int(current_time[:2]), int(current_time[3:5])
+                        total_mins = h * 60 + m
+                        if total_mins >= 11 * 60:
+                            time_risk = "HIGH"
+                            time_warning = "Past 11:00 AM — prime window closed, edge is degrading rapidly"
+                        elif total_mins >= 10 * 60 + 45:
+                            time_risk = "ELEVATED"
+                            time_warning = "Approaching 11:00 AM — tighten stop, prepare to exit"
+                        elif total_mins >= 10 * 60:
+                            time_risk = "MODERATE"
+                            time_warning = "10:00-11:00 AM — still tradeable but watch for fading volume"
+                        else:
+                            time_risk = "LOW"
+                            time_warning = "Prime window (before 11:00 AM) — full edge available"
+                    except Exception:
+                        pass
+
+                # Fetch live data for RSI and VWAP
+                live_data = {}
+                try:
+                    snapshot = self.fetcher.get_gainers_snapshot(max_price=999)
+                    snap = next((s for s in snapshot if s["ticker"] == ticker), {})
+                    live_data["vwap"]       = snap.get("vwap")
+                    live_data["high_of_day"]= snap.get("high")
+                    live_data["volume"]     = snap.get("volume_today")
+                    live_data["surge"]      = snap.get("surge_ratio")
+                    rsi = self.fetcher.get_rsi(ticker)
+                    live_data["rsi"]        = rsi
+                except Exception:
+                    pass
+
+                vwap    = live_data.get("vwap")
+                rsi_val = live_data.get("rsi")
+                hod     = live_data.get("high_of_day")
+
+                # Build signal list
+                signals = []
+                verdict = "HOLD"
+                urgency = "LOW"
+
+                # HARD EXIT checks (override everything)
+                if stop_hit:
+                    verdict = "CLOSE NOW"
+                    urgency = "CRITICAL"
+                    signals.append(f"STOP HIT — price ${current:.3f} breached stop ${stop:.3f}. Exit immediately, no debate.")
+
+                elif day_of_move == 3:
+                    verdict = "CLOSE NOW"
+                    urgency = "HIGH"
+                    signals.append("DAY 3 OF MOVE — distribution day. Rule: no holding. Exit now regardless of P&L.")
+
+                elif rsi_val and rsi_val > 80:
+                    verdict = "SCALE OUT 50%"
+                    urgency = "HIGH"
+                    signals.append(f"RSI {rsi_val} — overbought (>80). Momentum exhaustion signal. Take 50% off now.")
+
+                elif time_risk == "HIGH" and gross_pnl > 0:
+                    verdict = "CLOSE NOW"
+                    urgency = "HIGH"
+                    signals.append(f"TIME RISK — {time_warning}. You're profitable. Lock it in.")
+
+                elif time_risk == "HIGH" and gross_pnl <= 0:
+                    verdict = "CLOSE NOW"
+                    urgency = "HIGH"
+                    signals.append(f"TIME RISK + LOSING — {time_warning}. Cut the loss now before it gets worse.")
+
+                # SCALE OUT checks
+                elif achieved_pl >= 2.0 and not target_hit:
+                    verdict = "SCALE OUT 50%"
+                    urgency = "MODERATE"
+                    signals.append(
+                        f"2:1 ACHIEVED ({achieved_pl:.1f}:1) — take 50% off table. "
+                        f"Move stop to breakeven (${entry:.3f}) on remaining position."
+                    )
+
+                elif achieved_pl >= 3.0:
+                    verdict = "SCALE OUT 75%"
+                    urgency = "MODERATE"
+                    signals.append(
+                        f"3:1 ACHIEVED ({achieved_pl:.1f}:1) — take 75% off. "
+                        f"Trail stop tightly on the remainder."
+                    )
+
+                elif target_hit:
+                    verdict = "SCALE OUT 50%"
+                    urgency = "MODERATE"
+                    signals.append(
+                        f"TARGET HIT — price ${current:.3f} reached target ${target:.3f}. "
+                        f"Take 50% profit. Move stop to breakeven. Let remainder run if HOT market."
+                    )
+
+                elif time_risk == "ELEVATED" and gross_pnl > 0:
+                    verdict = "TRAIL STOP"
+                    urgency = "MODERATE"
+                    new_stop = round(current - (risk_per_sh * 0.5), 4) if direction == "LONG" else round(current + (risk_per_sh * 0.5), 4)
+                    signals.append(
+                        f"APPROACHING 11AM — {time_warning}. "
+                        f"Trail stop up to ${new_stop:.3f} to protect profit."
+                    )
+
+                elif vwap and direction == "LONG" and current < vwap and gross_pnl < 0:
+                    verdict = "CLOSE NOW"
+                    urgency = "HIGH"
+                    signals.append(
+                        f"BELOW VWAP (${vwap:.3f}) and losing — buyers have left. "
+                        f"Exit before stop is hit to reduce slippage."
+                    )
+
+                # ADD TO WINNER check
+                elif (achieved_pl >= 0.5 and cushion_built and day_of_move == 1
+                      and time_risk in ("LOW", "MODERATE")
+                      and rsi_val and rsi_val < 70
+                      and vwap and direction == "LONG" and current > vwap):
+                    verdict = "ADD TO WINNER"
+                    urgency = "LOW"
+                    signals.append(
+                        f"CONDITIONS MET to add: cushion built, Day 1, before 11AM, "
+                        f"RSI {rsi_val} (not overbought), price above VWAP. "
+                        f"Double position. Move stop to breakeven (${entry:.3f}) on full size."
+                    )
+
+                # HOLD check
+                else:
+                    verdict = "HOLD"
+                    urgency = "LOW"
+                    hold_reasons = []
+                    if vwap and direction == "LONG" and current > vwap:
+                        hold_reasons.append(f"above VWAP ${vwap:.3f}")
+                    if rsi_val and 40 <= rsi_val <= 70:
+                        hold_reasons.append(f"RSI {rsi_val} healthy")
+                    if time_risk in ("LOW", "MODERATE"):
+                        hold_reasons.append("still in prime window")
+                    if progress_to_target > 0:
+                        hold_reasons.append(f"{progress_to_target:.0f}% toward target")
+                    signals.append(
+                        "HOLD — " + (", ".join(hold_reasons) if hold_reasons
+                                     else "no hard exit signals triggered")
+                    )
+
+                # Suggested stop trail
+                trail_suggestion = None
+                if gross_pnl > 0 and direction == "LONG":
+                    trail_suggestion = round(current - risk_per_sh, 4)
+                elif gross_pnl > 0 and direction == "SHORT":
+                    trail_suggestion = round(current + risk_per_sh, 4)
+
+                return json.dumps({
+                    "ticker": ticker,
+                    "verdict": verdict,
+                    "urgency": urgency,
+                    "signals": signals,
+                    "position": {
+                        "direction": direction,
+                        "entry": entry,
+                        "current_price": current,
+                        "stop": stop,
+                        "target": target,
+                        "shares": shares,
+                        "day_of_move": day_of_move,
+                    },
+                    "pnl": {
+                        "gross_pnl": round(gross_pnl, 2),
+                        "slippage_to_exit": round(slip_cost, 2),
+                        "net_pnl_if_close_now": round(net_pnl_if_close, 2),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "achieved_pl_ratio": round(achieved_pl, 2),
+                        "progress_to_target_pct": round(progress_to_target, 1),
+                    },
+                    "live": {
+                        "rsi": rsi_val,
+                        "vwap": vwap,
+                        "high_of_day": hod,
+                        "volume_surge": live_data.get("surge"),
+                    },
+                    "risk": {
+                        "time_risk": time_risk,
+                        "time_warning": time_warning,
+                        "stop_hit": stop_hit,
+                        "target_hit": target_hit,
+                        "cushion_built": cushion_built,
+                    },
+                    "trail_stop_suggestion": trail_suggestion,
                 }, default=str)
 
             return json.dumps({"error": f"Unknown tool: {tool_name}"})

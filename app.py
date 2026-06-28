@@ -596,7 +596,7 @@ with tab_chat:
     elif not st.session_state.polygon_key:
         st.warning("Add your Polygon.io API key for live data lookups during chat.")
     else:
-        # Quick prompt buttons
+        # ── Quick analysis buttons ──────────────────────────────────
         st.markdown("**Quick Analysis:**")
         qcols = st.columns(4)
         quick_prompts = [
@@ -620,19 +620,101 @@ with tab_chat:
                                 labels = {
                                     "get_stock_details": f"🔍 Fetching details for {ticker}…",
                                     "get_stock_news": f"📰 Checking news for {ticker}…",
-                                    "compare_tickers": f"⚖️ Comparing {', '.join(inp.get('tickers', []))}…",
+                                    "compare_tickers": "⚖️ Comparing tickers…",
                                     "get_price_bars": f"📊 Loading price bars for {ticker}…",
                                     "assess_market_temperature": "🌡️ Assessing market temperature…",
                                     "calculate_trade_levels": f"📐 Calculating trade levels for {ticker}…",
+                                    "recommend_exit": f"🚪 Running exit analysis for {inp.get('ticker','')}…",
                                 }
                                 tool_status.caption(labels.get(name, f"Using tool: {name}…"))
-
                             reply = agent.chat(prompt, screener_context=context, on_tool_call=on_tool)
                             tool_status.empty()
                             st.session_state.chat_history.append(("agent", reply))
                         except Exception as e:
                             st.error(f"Agent error: {e}")
                 st.rerun()
+
+        # ── Exit recommendation panel ─────────────────────────────
+        st.markdown("---")
+        st.markdown("**🚪 Open Position — Exit Recommendation:**")
+        st.caption("Fill in your current position and get a CLOSE / SCALE OUT / HOLD / ADD verdict from the agent.")
+
+        with st.expander("Enter open position details", expanded=False):
+            ex1, ex2, ex3 = st.columns(3)
+            with ex1:
+                exit_ticker  = st.text_input("Ticker", key="exit_ticker", placeholder="e.g. ABIO").upper().strip()
+                exit_dir     = st.selectbox("Direction", ["LONG", "SHORT"], key="exit_dir")
+                exit_dom     = st.selectbox("Day of move", [1, 2, 3], key="exit_dom",
+                                            format_func=lambda x: f"Day {x}")
+            with ex2:
+                exit_entry   = st.number_input("Entry price ($)", 0.01, value=5.00, format="%.4f", key="exit_entry")
+                exit_stop    = st.number_input("Stop loss ($)",   0.01, value=4.85, format="%.4f", key="exit_stop")
+                exit_target  = st.number_input("Target ($)",      0.01, value=5.30, format="%.4f", key="exit_target")
+            with ex3:
+                exit_current = st.number_input("Current price ($)", 0.01, value=5.15, format="%.4f", key="exit_current")
+                exit_shares  = st.number_input("Shares held", 1, value=500, step=50, key="exit_shares")
+                exit_slip    = st.number_input("Slippage/share (¢)", 0.0, 10.0, 2.0, 0.5, key="exit_slip")
+
+            ex4, ex5, ex6 = st.columns(3)
+            with ex4:
+                exit_entry_time   = st.text_input("Entry time (HH:MM)", placeholder="09:45", key="exit_etime")
+            with ex5:
+                exit_current_time = st.text_input("Current time (HH:MM)", placeholder="10:30", key="exit_ctime")
+            with ex6:
+                exit_cushion = st.toggle("Cushion built today?", value=False, key="exit_cushion",
+                                         help="Have you already banked 25%+ of your daily goal?")
+
+            # Live P&L preview
+            if exit_dir == "LONG":
+                preview_gross = (exit_current - exit_entry) * exit_shares
+            else:
+                preview_gross = (exit_entry - exit_current) * exit_shares
+            preview_slip = (exit_slip / 100) * exit_shares * 2
+            preview_net  = preview_gross - preview_slip
+            prev_col = "#4ade80" if preview_net >= 0 else "#f87171"
+            risk_sh = abs(exit_entry - exit_stop)
+            achieved = (abs(exit_current - exit_entry) / risk_sh) if risk_sh > 0 else 0
+
+            st.markdown(f"""
+            <div style="background:#0f172a;border:1px solid #1e3a5f;border-radius:8px;
+                        padding:10px 16px;margin:6px 0;font-size:13px;display:flex;gap:24px;flex-wrap:wrap">
+              <span>Gross: <b style="color:{'#4ade80' if preview_gross>=0 else '#f87171'}">${preview_gross:+,.2f}</b></span>
+              <span>Slip: <b style="color:#f87171">-${preview_slip:.2f}</b></span>
+              <span>Net: <b style="color:{prev_col};font-size:15px">${preview_net:+,.2f}</b></span>
+              <span>P/L achieved: <b>{achieved:.2f}:1</b></span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("🚪 Get Exit Recommendation", type="primary", key="exit_btn"):
+                if not exit_ticker:
+                    st.error("Enter a ticker.")
+                else:
+                    prompt = (
+                        f"I'm currently in an open {exit_dir} position on {exit_ticker}. "
+                        f"Here are my details: entry ${exit_entry:.4f}, current price ${exit_current:.4f}, "
+                        f"stop ${exit_stop:.4f}, target ${exit_target:.4f}, {exit_shares} shares, "
+                        f"day {exit_dom} of the move, entered at {exit_entry_time or 'unknown time'}, "
+                        f"current time {exit_current_time or 'unknown'}, "
+                        f"slippage {exit_slip:.1f}¢/share, "
+                        f"cushion {'built' if exit_cushion else 'NOT built'} today. "
+                        f"Should I close, scale out, hold, or add? Give me a specific verdict."
+                    )
+                    st.session_state.chat_history.append(("user", prompt))
+                    agent = get_agent()
+                    if agent:
+                        with st.spinner("Running exit analysis…"):
+                            try:
+                                tool_status = st.empty()
+                                def on_tool_exit(name, inp):
+                                    tool_status.caption(
+                                        f"🚪 Fetching live RSI, VWAP, and price data for {inp.get('ticker',exit_ticker)}…"
+                                    )
+                                reply = agent.chat(prompt, on_tool_call=on_tool_exit)
+                                tool_status.empty()
+                                st.session_state.chat_history.append(("agent", reply))
+                            except Exception as e:
+                                st.error(f"Agent error: {e}")
+                    st.rerun()
 
         st.markdown("---")
 
