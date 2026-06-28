@@ -5,7 +5,7 @@ Built on Ross Cameron's (Warrior Trading) methodology:
 • Bull flag entries with 2:1 P/L
 • Profit-cushion position sizing system
 • Hot/cold market detection
-Live data: Polygon.io | AI analysis: Claude (Anthropic)
+Live data: Polygon.io | AI analysis: Gemini (Google AI Studio)
 """
 
 import streamlit as st
@@ -14,13 +14,19 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 import os
-import time
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from data_fetcher import PolygonFetcher
-from ai_agent import TradingAgent
+# Pull keys from Streamlit secrets (cloud) or .env (local)
+def _secret(key: str) -> str:
+    try:
+        return st.secrets.get(key, os.getenv(key, ""))
+    except Exception:
+        return os.getenv(key, "")
+
+from data_fetcher import PolygonFetcher  # noqa: E402
+from ai_agent import TradingAgent  # noqa: E402
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -72,8 +78,8 @@ def init_state():
         "chat_history": [],
         "agent": None,
         "last_scan_time": None,
-        "polygon_key": os.getenv("POLYGON_API_KEY", ""),
-        "anthropic_key": os.getenv("ANTHROPIC_API_KEY", ""),
+        "polygon_key": _secret("POLYGON_API_KEY"),
+        "anthropic_key": _secret("GEMINI_API_KEY"),
         "scanning": False,
         "selected_ticker": None,
         "daily_goal": 1000,
@@ -99,7 +105,7 @@ def get_agent():
     if st.session_state.agent is None:
         if st.session_state.polygon_key and st.session_state.anthropic_key:
             st.session_state.agent = TradingAgent(
-                anthropic_api_key=st.session_state.anthropic_key,
+                gemini_api_key=st.session_state.anthropic_key,
                 polygon_api_key=st.session_state.polygon_key,
             )
     return st.session_state.agent
@@ -110,21 +116,32 @@ def grade_badge(grade):
 def criteria_score(row: dict) -> tuple[str, int]:
     """Quick 5-criteria grade for display."""
     passes = 0
-    if row.get("change_pct", 0) >= 10: passes += 1
-    elif row.get("change_pct", 0) >= 2: passes += 0.5
-    if row.get("surge_ratio", 0) >= 5: passes += 1
-    elif row.get("surge_ratio", 0) >= 2: passes += 0.5
-    if row.get("has_news"): passes += 1
+    if row.get("change_pct", 0) >= 10:
+        passes += 1
+    elif row.get("change_pct", 0) >= 2:
+        passes += 0.5
+    if row.get("surge_ratio", 0) >= 5:
+        passes += 1
+    elif row.get("surge_ratio", 0) >= 2:
+        passes += 0.5
+    if row.get("has_news"):
+        passes += 1
     price = row.get("price", 0)
-    if 2 <= price <= 20: passes += 1
+    if 2 <= price <= 20:
+        passes += 1
     float_m = row.get("float_m")
-    if float_m and float_m <= 10: passes += 1
-    elif float_m and float_m <= 20: passes += 0.5
+    if float_m and float_m <= 10:
+        passes += 1
+    elif float_m and float_m <= 20:
+        passes += 0.5
 
     passes = int(passes)
-    if passes >= 5: return "A", passes
-    elif passes >= 4: return "B", passes
-    elif passes >= 3: return "C", passes
+    if passes >= 5:
+        return "A", passes
+    elif passes >= 4:
+        return "B", passes
+    elif passes >= 3:
+        return "C", passes
     return "D", passes
 
 def cushion_pct():
@@ -133,11 +150,14 @@ def cushion_pct():
     return min(100, (st.session_state.current_pnl / st.session_state.daily_goal) * 100)
 
 def market_temp_from_df(df: pd.DataFrame) -> str:
-    if df.empty: return "COLD"
+    if df.empty:
+        return "COLD"
     a_count = sum(1 for _, r in df.iterrows() if criteria_score(r.to_dict())[0] == "A")
     avg_surge = df["surge_ratio"].mean() if "surge_ratio" in df.columns else 0
-    if a_count >= 2 and avg_surge >= 5: return "HOT"
-    if a_count >= 1: return "WARM"
+    if a_count >= 2 and avg_surge >= 5:
+        return "HOT"
+    if a_count >= 1:
+        return "WARM"
     return "COLD"
 
 
@@ -150,8 +170,8 @@ with st.sidebar:
     with st.expander("🔑 API Keys", expanded=not st.session_state.polygon_key):
         pk = st.text_input("Polygon.io API Key", value=st.session_state.polygon_key,
                            type="password", help="Free tier: polygon.io/dashboard/signup")
-        ak = st.text_input("Anthropic API Key", value=st.session_state.anthropic_key,
-                           type="password", help="console.anthropic.com")
+        ak = st.text_input("Google AI Studio API Key", value=st.session_state.anthropic_key,
+                           type="password", help="aistudio.google.com → Get API key")
         if st.button("Save Keys"):
             st.session_state.polygon_key = pk
             st.session_state.anthropic_key = ak
@@ -217,7 +237,7 @@ with st.sidebar:
 # MAIN LAYOUT
 # ─────────────────────────────────────────────
 st.markdown("# 📈 Day Trade Agent")
-st.caption("Ross Cameron methodology · Polygon.io live data · Claude AI analysis")
+st.caption("Ross Cameron methodology · Polygon.io live data · Gemini AI analysis")
 
 tab_screener, tab_chart, tab_chat, tab_guide = st.tabs(
     ["🔍 Screener", "📊 Chart", "🤖 AI Agent", "📚 Framework"]
@@ -566,8 +586,8 @@ with tab_chat:
     st.markdown("### 🤖 Day Trade AI Agent")
     st.caption("Powered by Ross Cameron's methodology · Ask about setups, grading, sizing, or market temperature")
 
-    if not st.session_state.anthropic_key:
-        st.error("Add your Anthropic API key in the sidebar to use the AI agent.")
+    if not st.session_state.anthropic_key:  # reusing key for Gemini
+        st.error("Add your Google AI Studio API key in the sidebar to use the AI agent.")
     elif not st.session_state.polygon_key:
         st.warning("Add your Polygon.io API key for live data lookups during chat.")
     else:
@@ -650,7 +670,7 @@ with tab_chat:
                             labels = {
                                 "get_stock_details": f"🔍 Fetching details for {ticker}…",
                                 "get_stock_news": f"📰 Checking catalyst for {ticker}…",
-                                "compare_tickers": f"⚖️ Comparing tickers…",
+                                "compare_tickers": "⚖️ Comparing tickers…",
                                 "get_price_bars": f"📊 Loading price bars for {ticker}…",
                                 "assess_market_temperature": "🌡️ Reading market temperature…",
                                 "calculate_trade_levels": f"📐 Calculating 2:1 levels for {ticker}…",
