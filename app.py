@@ -78,6 +78,8 @@ def init_state():
         "chat_history": [],
         "agent": None,
         "last_scan_time": None,
+        "screener_source": "",
+        "screener_dropped": {},
         "polygon_key": _secret("POLYGON_API_KEY"),
         "anthropic_key": _secret("GEMINI_API_KEY"),
         "scanning": False,
@@ -259,8 +261,9 @@ with tab_screener:
 
     with col_time:
         if st.session_state.last_scan_time:
-            st.caption(f"Last scan: {st.session_state.last_scan_time.strftime('%H:%M:%S')} · "
-                       f"{len(st.session_state.screener_df)} results")
+            src = getattr(st.session_state, "screener_source", "")
+            src_label = " · 📡 Live" if src == "live" else f" · 🕐 Historical ({src.split(':')[1] if ':' in src else src})"
+            st.caption(f"Last scan: {st.session_state.last_scan_time.strftime('%H:%M:%S')} · {len(st.session_state.screener_df)} results{src_label}")
 
     with col_temp:
         temp = market_temp_from_df(st.session_state.screener_df)
@@ -274,47 +277,91 @@ with tab_screener:
         if not fetcher:
             st.error("Add your Polygon.io API key in the sidebar first.")
         else:
-            progress_bar = st.progress(0, text="Starting scan…")
-            status_text = st.empty()
+            # Validate API key first
+            key_check = fetcher.check_api_key()
+            if not key_check["valid"]:
+                st.error(
+                    f"❌ Polygon API key error: {key_check.get('error', 'invalid key')}. "
+                    f"Check your key at polygon.io/dashboard."
+                )
+            else:
+                progress_bar = st.progress(0, text="Starting scan…")
+                status_text = st.empty()
 
-            def on_progress(i, total, ticker):
-                pct = int((i / max(total, 1)) * 100)
-                progress_bar.progress(pct, text=f"Enriching {ticker} ({i+1}/{total})…")
-                status_text.caption(f"Fetching RSI + float + news for {ticker}…")
+                def on_progress(i, total, ticker):
+                    pct = int((i / max(total, 1)) * 100)
+                    progress_bar.progress(pct, text=f"Enriching {ticker} ({i+1}/{total})…")
+                    status_text.caption(f"Fetching RSI + float + news for {ticker}…")
 
-            with st.spinner("Scanning market…"):
-                try:
-                    df = fetcher.screen(
-                        min_price=min_price,
-                        max_price=max_price,
-                        min_avg_vol_k=min_vol_k,
-                        min_surge=min_surge,
-                        min_chg_pct=min_chg,
-                        max_float_m=max_float,
-                        rsi_lo=rsi_lo,
-                        rsi_hi=rsi_hi,
-                        require_news=require_news,
-                        top_n=10,
-                        enrich=True,
-                        on_progress=on_progress,
-                    )
-                    st.session_state.screener_df = df
-                    st.session_state.last_scan_time = datetime.now()
-                    progress_bar.empty()
-                    status_text.empty()
-                    # Reset agent context with new data
-                    agent = get_agent()
-                    if agent:
-                        agent.reset()
-                        st.session_state.chat_history = []
-                except Exception as e:
-                    st.error(f"Scan error: {e}")
-                    progress_bar.empty()
+                with st.spinner("Scanning market…"):
+                    try:
+                        result = fetcher.screen(
+                            min_price=min_price,
+                            max_price=max_price,
+                            min_avg_vol_k=min_vol_k,
+                            min_surge=min_surge,
+                            min_chg_pct=min_chg,
+                            max_float_m=max_float,
+                            rsi_lo=rsi_lo,
+                            rsi_hi=rsi_hi,
+                            require_news=require_news,
+                            top_n=10,
+                            enrich=True,
+                            on_progress=on_progress,
+                        )
+                        progress_bar.empty()
+                        status_text.empty()
+
+                        df_result = result["df"]
+                        source    = result["source"]
+                        warning   = result.get("warning")
+                        dropped   = result.get("dropped", {})
+
+                        st.session_state.screener_df      = df_result
+                        st.session_state.screener_source  = source
+                        st.session_state.screener_dropped = dropped
+                        st.session_state.last_scan_time   = datetime.now()
+
+                        # Show source banner
+                        if source.startswith("historical"):
+                            trade_date = source.split(":")[1]
+                            st.warning(
+                                f"⚠️ **Market closed or no live data** — showing last trading day "
+                                f"({trade_date}) from historical bars. "
+                                f"Use for analysis and practice only."
+                            )
+                        else:
+                            st.success(f"✅ Live scan complete — {len(df_result)} results")
+
+                        # Show warning if empty with filter diagnostics
+                        if warning:
+                            d = dropped
+                            st.error(f"⚠️ {warning}")
+                            st.markdown(
+                                f"**Filter funnel:** "
+                                f"Snapshot → **{d.get('after_snapshot',0)}** stocks in price range · "
+                                f"Volume filter → **{d.get('after_volume',0)}** · "
+                                f"Surge filter → **{d.get('after_surge',0)}** · "
+                                f"% Change filter → **{d.get('after_change',0)}** · "
+                                f"After enrichment → **{d.get('after_enrich',0)}**"
+                            )
+
+                        # Reset agent context
+                        agent = get_agent()
+                        if agent and not df_result.empty:
+                            agent.reset()
+                            st.session_state.chat_history = []
+
+                    except Exception as e:
+                        st.error(f"Scan error: {e}")
+                        progress_bar.empty()
+                        status_text.empty()
 
     df = st.session_state.screener_df
+    source_label = getattr(st.session_state, "screener_source", "")
 
     if df.empty:
-        st.info("Click **▶ Run Live Scan** to fetch today's top penny stock movers.")
+        st.info("Click **▶ Run Live Scan** to fetch today's top movers.")
         with st.expander("Demo mode — what the screener will show"):
             st.markdown("""
             Each result will show:
