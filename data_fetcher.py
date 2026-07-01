@@ -325,6 +325,7 @@ class PolygonFetcher:
             "after_surge":    0,
             "after_change":   0,
             "after_enrich":   0,
+            "is_historical":  source.startswith("historical"),
         }
 
         if not candidates:
@@ -351,7 +352,9 @@ class PolygonFetcher:
         if is_historical:
             after_vol   = candidates          # skip volume floor
             after_surge = candidates          # skip surge (not intraday)
-            after_chg   = [c for c in candidates if c["change_pct"] >= min(min_chg_pct, 1.0)]
+            # Keep all stocks — sort by absolute % change so best movers surface first.
+            # A flat or slightly red stock is still useful for practice analysis.
+            after_chg   = sorted(candidates, key=lambda x: abs(x["change_pct"]), reverse=True)
         else:
             after_vol   = [c for c in candidates if c["volume_today"] >= min_avg_vol]
             after_surge = [c for c in after_vol   if c["surge_ratio"]  >= min_surge]
