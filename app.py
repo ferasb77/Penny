@@ -28,6 +28,7 @@ def _secret(key: str) -> str:
 
 from data_fetcher import PolygonFetcher  # noqa: E402
 from ai_agent import TradingAgent  # noqa: E402
+from technical_analysis import generate_pdf  # noqa: E402
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -81,6 +82,8 @@ def init_state():
         "last_scan_time": None,
         "screener_source": "",
         "screener_dropped": {},
+        "ta_analysis_cache": {},
+        "ta_pdf_cache": {},
         "polygon_key": _secret("POLYGON_API_KEY"),
         "anthropic_key": _secret("GEMINI_API_KEY"),
         "scanning": False,
@@ -326,9 +329,10 @@ def render_ticker_panel(ticker: str, chart_days: int = 10, panel_key: str = "mai
     )
     st.plotly_chart(fig_v, use_container_width=True)
 
-    # ── AI grade + quick analysis ──────────────────────────────────
+    # ── AI grade + quick analysis + TA report ────────────────────
     if agent and st.session_state.anthropic_key:
-        col_ai1, col_ai2 = st.columns([1, 1])
+        col_ai1, col_ai2, col_ai3 = st.columns([1, 1, 1])
+
         with col_ai1:
             if st.button(f"🤖 Grade {ticker} (5 criteria)", key=f"grade_{ticker}_{panel_key}"):
                 prompt = (
@@ -341,19 +345,21 @@ def render_ticker_panel(ticker: str, chart_days: int = 10, panel_key: str = "mai
                         reply = agent.chat(prompt)
                         st.session_state.chat_history.append(("user", prompt))
                         st.session_state.chat_history.append(("agent", reply))
+                        st.session_state.ta_analysis_cache[ticker] = reply
                         st.success("Analysis added to AI Agent tab ↗")
                         with st.expander(f"Quick view — {ticker} analysis"):
                             st.markdown(reply)
                     except Exception as e:
                         st.error(f"Agent error: {e}")
+
         with col_ai2:
-            if st.button(f"📐 Calculate entry levels for {ticker}", key=f"levels_{ticker}_{panel_key}"):
+            if st.button(f"📐 Entry levels for {ticker}", key=f"levels_{ticker}_{panel_key}"):
                 last_price = float(bars_df["close"].iloc[-1])
                 prompt = (
-                    f"For {ticker} currently at ${last_price:.3f} with a high of day at ${hod:.3f}: "
-                    f"calculate the bull flag entry, stop loss, and 2:1 profit target. "
-                    f"Tell me exactly what price to enter, where to set my stop, "
-                    f"and confirm whether this gives me the 2:1 P/L ratio."
+                    f"For {ticker} currently at ${last_price:.3f} with a high of day "
+                    f"at ${hod:.3f}: calculate the bull flag entry, stop loss, and 2:1 "
+                    f"profit target. Tell me exactly what price to enter, where to set "
+                    f"my stop, and confirm whether this gives me the 2:1 P/L ratio."
                 )
                 with st.spinner("Calculating…"):
                     try:
@@ -364,6 +370,78 @@ def render_ticker_panel(ticker: str, chart_days: int = 10, panel_key: str = "mai
                             st.markdown(reply)
                     except Exception as e:
                         st.error(f"Agent error: {e}")
+
+        with col_ai3:
+            if st.button(f"📋 Generate TA Report", key=f"ta_report_{ticker}_{panel_key}",
+                         help="Generate full technical analysis + export as PDF"):
+                last_price = float(bars_df["close"].iloc[-1])
+                prompt = (
+                    f"Write a complete technical analysis for {ticker}. "
+                    f"Current price: ${last_price:.3f}. High of day: ${hod:.3f}. "
+                    f"Cover: (1) the 5-criteria grade with specific reasons for each pass/fail, "
+                    f"(2) whether a bull flag is forming and where the entry trigger is, "
+                    f"(3) the exact entry, stop, and 2:1 target price, "
+                    f"(4) day-of-move assessment (day 1, 2, or 3?), "
+                    f"(5) key risks to watch, "
+                    f"(6) your overall verdict: trade it, watch it, or skip it. "
+                    f"Be specific with prices and numbers."
+                )
+                with st.spinner("Generating technical analysis…"):
+                    try:
+                        ai_text = agent.chat(prompt)
+                        st.session_state.chat_history.append(("user", prompt))
+                        st.session_state.chat_history.append(("agent", ai_text))
+                        st.session_state.ta_analysis_cache[ticker] = ai_text
+
+                        # Score criteria for the PDF
+                        from ai_agent import TradingAgent as _TA
+                        criteria_score_full = {}
+                        if hasattr(agent, "_score_criteria"):
+                            row_dict = {
+                                "ticker": ticker,
+                                "price": last_price,
+                                "change_pct": float(bars_df["close"].pct_change().iloc[-1] * 100) if len(bars_df) > 1 else 0,
+                                "surge_ratio": 1.0,
+                                "has_news": len(news or []) > 0,
+                                "float_m": None,
+                            }
+                            scored = agent._score_criteria(row_dict)
+                            grade_pdf  = scored["grade"]
+                            criteria_score_full = scored["criteria"]
+                        else:
+                            grade_pdf = "B"
+
+                        # Generate PDF
+                        pdf_bytes = generate_pdf(
+                            ticker=ticker,
+                            bars_df=bars_df,
+                            criteria=criteria_score_full,
+                            grade=grade_pdf,
+                            entry=last_price,
+                            stop=round(last_price * 0.95, 4),
+                            target=hod,
+                            ai_analysis=ai_text,
+                            news=news or [],
+                            company_name="",
+                        )
+                        st.session_state.ta_pdf_cache[ticker] = pdf_bytes
+                        st.success("✅ Technical analysis complete — download below")
+                        with st.expander(f"📋 {ticker} Technical Analysis"):
+                            st.markdown(ai_text)
+                    except Exception as e:
+                        st.error(f"Report error: {e}")
+
+        # ── PDF download button ────────────────────────────────────
+        if ticker in st.session_state.get("ta_pdf_cache", {}):
+            pdf_bytes = st.session_state.ta_pdf_cache[ticker]
+            fn = f"{ticker}_technical_analysis_{datetime.now().strftime('%Y%m%d')}.pdf"
+            st.download_button(
+                label=f"⬇️  Download {ticker} PDF Report",
+                data=pdf_bytes,
+                file_name=fn,
+                mime="application/pdf",
+                key=f"dl_pdf_{ticker}_{panel_key}",
+            )
 
     # ── Trade level calculator ─────────────────────────────────────
     st.markdown("#### 📐 Trade Level Calculator")
