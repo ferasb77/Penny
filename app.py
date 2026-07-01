@@ -151,6 +151,28 @@ def cushion_pct():
         return 0
     return min(100, (st.session_state.current_pnl / st.session_state.daily_goal) * 100)
 
+def _drop_reason(c: dict, filters: dict) -> str:
+    """Explain why a candidate was dropped at the enrichment stage."""
+    reasons = []
+    max_float = filters.get("max_float_m", 20)
+    rsi_lo    = filters.get("rsi_lo", 40)
+    rsi_hi    = filters.get("rsi_hi", 70)
+
+    float_m = c.get("float_m")
+    rsi     = c.get("rsi")
+    news    = c.get("has_news", False)
+
+    if float_m and float_m > max_float:
+        reasons.append(f"Float {float_m}M > {max_float}M limit")
+    if rsi and (rsi < rsi_lo or rsi > rsi_hi):
+        reasons.append(f"RSI {rsi} outside {rsi_lo}–{rsi_hi}")
+    if filters.get("require_news") and not news:
+        reasons.append("No news catalyst")
+    if not reasons:
+        reasons.append("Unknown — may be float/RSI data missing")
+    return " · ".join(reasons)
+
+
 def market_temp_from_df(df: pd.DataFrame) -> str:
     if df.empty:
         return "COLD"
@@ -321,6 +343,15 @@ with tab_screener:
                         st.session_state.screener_source  = source
                         st.session_state.screener_dropped = dropped
                         st.session_state.last_scan_time   = datetime.now()
+                        # Store filter settings and raw enriched candidates
+                        # so the empty-result view can show what got dropped
+                        st.session_state.screener_filter_settings = {
+                            "max_float_m":  max_float,
+                            "rsi_lo":       rsi_lo,
+                            "rsi_hi":       rsi_hi,
+                            "require_news": require_news,
+                        }
+                        st.session_state.screener_raw_candidates = result.get("raw_candidates", [])
 
                         # Show source banner
                         if source.startswith("historical"):
@@ -361,7 +392,45 @@ with tab_screener:
     source_label = getattr(st.session_state, "screener_source", "")
 
     if df.empty:
-        st.info("Click **▶ Run Live Scan** to fetch today's top movers.")
+        dropped = getattr(st.session_state, "screener_dropped", {})
+        last_scan = st.session_state.last_scan_time
+
+        if last_scan and dropped:
+            # A scan ran but all results were filtered out — show what got dropped
+            st.warning("No results survived the filters. Here's what happened:")
+
+            # Show each candidate that was fetched and why it was dropped
+            raw_candidates = getattr(st.session_state, "screener_raw_candidates", [])
+            if raw_candidates:
+                st.markdown("#### Candidates fetched — dropped at enrichment stage")
+                st.caption(
+                    "These stocks were fetched from Polygon but dropped by float / RSI filters. "
+                    "You can still analyze them manually using the Chart tab or AI Agent."
+                )
+                rows = []
+                for c in raw_candidates:
+                    rows.append({
+                        "Ticker":    c.get("ticker", "?"),
+                        "Price":     f"${c.get('price', 0):.2f}",
+                        "% Chg":     f"{c.get('change_pct', 0):+.1f}%",
+                        "Vol Surge": f"{c.get('surge_ratio', 0):.1f}×",
+                        "VWAP":      f"${c.get('vwap', 0):.2f}",
+                        "Float":     f"{c.get('float_m')}M" if c.get('float_m') else "unknown",
+                        "RSI":       str(c.get('rsi', '—')),
+                        "News":      "✅" if c.get('has_news') else "❌",
+                        "Drop reason": _drop_reason(c, st.session_state.get('screener_filter_settings', {})),
+                    })
+                if rows:
+                    st.dataframe(rows, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "💡 Click the **Chart** tab and type any of these tickers to see price bars. "
+                        "Ask the **AI Agent** to grade them."
+                    )
+            else:
+                st.info("Run a scan first to see dropped candidates.")
+        else:
+            st.info("Click **▶ Run Live Scan** to fetch today's top movers.")
+
         with st.expander("Demo mode — what the screener will show"):
             st.markdown("""
             Each result will show:

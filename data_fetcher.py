@@ -397,12 +397,15 @@ class PolygonFetcher:
 
         # ── Step 3: enrich + post-enrichment filters ───────────────────────────
         enriched = []
+        all_enriched = []   # all candidates after enrichment, before filtering
         for i, c in enumerate(top_candidates):
             if on_progress:
                 on_progress(i, len(top_candidates), c["ticker"])
             if enrich:
                 time.sleep(0.2)
                 c = self.enrich_ticker(c, fetch_rsi=True)
+
+            all_enriched.append(c)   # save before filter decision
 
             if enrich:
                 if not is_historical:
@@ -414,8 +417,7 @@ class PolygonFetcher:
                     if require_news and not c.get("has_news"):
                         continue
                 else:
-                    # Historical mode: only hard-fail on float — RSI and news
-                    # are less meaningful on weekend/closed-market data
+                    # Historical mode: only hard-fail on very large floats
                     if c.get("float_m") and c["float_m"] > max_float_m * 3:
                         continue
 
@@ -450,4 +452,5 @@ class PolygonFetcher:
             "candidates": len(candidates),
             "dropped":    diagnostic,
             "warning":    None,
+            "raw_candidates": all_enriched,
         }
