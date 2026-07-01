@@ -454,77 +454,94 @@ with tab_screener:
         m2.metric("A-Grade Setups", a_setups, help="All 5 criteria met")
         m3.metric("B-Grade Setups", b_setups, help="4/5 criteria met")
         m4.metric("Avg Vol Surge", f"{avg_surge_val:.1f}×")
-        m5.metric("Avg % Change", f"+{avg_chg_val:.1f}%")
+        m5.metric("Avg % Change", f"{avg_chg_val:+.1f}%")
 
         st.markdown("---")
 
-        # ── Results table ────────────────────────────────
+        # ── Results table ─────────────────────────────────
         st.markdown("### Top Picks · Ranked by Dollar Volume")
-        st.caption("Click a ticker to load its chart and send it to the AI agent.")
+        st.caption("Click a ticker button to load its chart and send it to the AI agent.")
+
+        # Header row
+        hcols = st.columns([0.5, 0.8, 1.0, 0.9, 0.9, 0.9, 0.9, 0.8, 0.9, 1.0, 1.2])
+        headers = ["Grade", "Ticker", "Price", "% Chg", "Vol Surge",
+                   "RSI", "Float", "News", "Spread", "Criteria", "Vol Score"]
+        for hc, ht in zip(hcols, headers):
+            hc.markdown(f"<small style='color:#6b7280;font-weight:600;text-transform:uppercase;"
+                        f"letter-spacing:.5px'>{ht}</small>", unsafe_allow_html=True)
+        st.markdown("<hr style='margin:4px 0 8px;border-color:#1f2937'>", unsafe_allow_html=True)
 
         for idx, row in df.iterrows():
             row_dict = row.to_dict()
             grade, passes = criteria_score(row_dict)
-            ticker = row_dict.get("ticker", "?")
+            ticker    = row_dict.get("ticker", "?")
+            price     = row_dict.get("price", 0) or 0
+            chg       = row_dict.get("change_pct", 0) or 0
+            surge     = row_dict.get("surge_ratio", 0) or 0
+            rsi_raw   = row_dict.get("rsi")
+            float_raw = row_dict.get("float_m")
+            has_news  = row_dict.get("has_news", False)
+            spread    = row_dict.get("spread") or row_dict.get("bid_ask_spread")
+            dollar_vol = row_dict.get("dollar_vol", price * row_dict.get("volume_today", 0))
 
-            with st.container():
-                cols = st.columns([0.6, 1.2, 1, 1, 1, 1, 1, 1, 1, 1.5])
+            # Clean nan values
+            import math
+            rsi     = rsi_raw   if rsi_raw   and not (isinstance(rsi_raw,   float) and math.isnan(rsi_raw))   else None
+            float_m = float_raw if float_raw and not (isinstance(float_raw, float) and math.isnan(float_raw)) else None
 
-                with cols[0]:
-                    st.markdown(grade_badge(grade), unsafe_allow_html=True)
+            cols = st.columns([0.5, 0.8, 1.0, 0.9, 0.9, 0.9, 0.9, 0.8, 0.9, 1.0, 1.2])
 
-                with cols[1]:
-                    if st.button(f"**{ticker}**", key=f"ticker_{ticker}",
-                                  help="Load chart + analyze with AI"):
-                        st.session_state.selected_ticker = ticker
+            with cols[0]:
+                st.markdown(grade_badge(grade), unsafe_allow_html=True)
 
-                with cols[2]:
-                    price = row_dict.get("price", 0)
-                    st.markdown(f"**${price:.3f}**")
+            with cols[1]:
+                if st.button(ticker, key=f"ticker_{ticker}_{idx}",
+                             help="Load chart + analyze with AI"):
+                    st.session_state.selected_ticker = ticker
 
-                with cols[3]:
-                    chg = row_dict.get("change_pct", 0)
-                    color = "green" if chg > 0 else "red"
-                    st.markdown(f":{color}[+{chg:.1f}%]")
+            with cols[2]:
+                st.markdown(f"**${price:.3f}**")
 
-                with cols[4]:
-                    surge = row_dict.get("surge_ratio", 0)
-                    surge_color = "green" if surge >= 5 else "orange" if surge >= 3 else "red"
-                    st.markdown(f":{surge_color}[{surge:.1f}×]")
+            with cols[3]:
+                chg_color = "green" if chg > 0 else "red"
+                st.markdown(f":{chg_color}[{chg:+.1f}%]")
 
-                with cols[5]:
-                    rsi = row_dict.get("rsi")
-                    if rsi:
-                        rsi_color = "green" if 40 <= rsi <= 70 else "orange"
-                        st.markdown(f":{rsi_color}[RSI {rsi}]")
-                    else:
-                        st.caption("RSI —")
+            with cols[4]:
+                surge_color = "green" if surge >= 5 else "orange" if surge >= 3 else "red"
+                st.markdown(f":{surge_color}[{surge:.1f}×]")
 
-                with cols[6]:
-                    float_m = row_dict.get("float_m")
-                    if float_m:
-                        fc = "green" if float_m <= 10 else "orange" if float_m <= 20 else "red"
-                        st.markdown(f":{fc}[{float_m}M]")
-                    else:
-                        st.caption("Float —")
+            with cols[5]:
+                if rsi is not None:
+                    rsi_color = "green" if 40 <= rsi <= 70 else "orange"
+                    st.markdown(f":{rsi_color}[{rsi:.1f}]")
+                else:
+                    st.caption("—")
 
-                with cols[7]:
-                    has_news = row_dict.get("has_news", False)
-                    st.markdown("✅ news" if has_news else "⚠️ no news")
+            with cols[6]:
+                if float_m is not None:
+                    fc = "green" if float_m <= 10 else "orange" if float_m <= 20 else "red"
+                    st.markdown(f":{fc}[{float_m:.0f}M]")
+                else:
+                    st.caption("—")
 
-                with cols[8]:
-                    spread = row_dict.get("spread", row_dict.get("bid_ask_spread"))
-                    if spread:
-                        spread_color = "green" if spread < 2 else "orange" if spread < 4 else "red"
-                        st.markdown(f":{spread_color}[{spread:.1f}% sprd]")
-                    else:
-                        st.caption("Spread —")
+            with cols[7]:
+                st.markdown("✅" if has_news else "❌")
 
-                with cols[9]:
-                    criteria_count = f"{passes}/5 criteria"
-                    st.caption(criteria_count)
+            with cols[8]:
+                if spread:
+                    sc = "green" if spread < 2 else "orange" if spread < 4 else "red"
+                    st.markdown(f":{sc}[{spread:.1f}%]")
+                else:
+                    st.caption("—")
 
-                st.divider()
+            with cols[9]:
+                st.caption(f"{passes}/5")
+
+            with cols[10]:
+                dv_m = dollar_vol / 1_000_000
+                st.caption(f"${dv_m:.1f}M")
+
+            st.divider()
 
         # ── Volume surge chart ───────────────────────────
         if "surge_ratio" in df.columns and "ticker" in df.columns:
