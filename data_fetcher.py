@@ -121,14 +121,13 @@ class PolygonFetcher:
         max_price: float,
     ) -> tuple[list[dict], str]:
         """
-        Use Polygon's grouped daily bars endpoint — returns ALL US stocks
-        for a given date in one API call. Much more reliable than individual
-        ticker lookups. Tries the last 5 trading days until it finds data.
+        Use Polygon grouped daily bars to find small-cap momentum movers.
+        Aggressively excludes large-cap stocks so results match the Ross Cameron
+        universe: $2-$20, genuine % move, not institutional dollar volume.
         """
         trading_days = _last_n_trading_days(5)
-
-        trade_date = None
-        day_bars   = []
+        trade_date   = None
+        day_bars     = []
 
         for candidate_date in trading_days:
             data = self._get(
@@ -143,7 +142,7 @@ class PolygonFetcher:
         if not day_bars:
             return [], f"historical:{trading_days[0]}"
 
-        # Also fetch the previous trading day for % change calculation
+        # Fetch previous day for % change calculation
         idx = trading_days.index(trade_date)
         prev_bars_map = {}
         if idx + 1 < len(trading_days):
@@ -152,45 +151,63 @@ class PolygonFetcher:
                 f"/v2/aggs/grouped/locale/us/market/stocks/{prev_date}",
                 {"adjusted": "true", "include_otc": "false"},
             )
-            prev_bars_map = {
-                r["T"]: r for r in prev_data.get("results", [])
-            }
+            prev_bars_map = {r["T"]: r for r in prev_data.get("results", [])}
 
         results = []
         for bar in day_bars:
             ticker = bar.get("T", "")
             price  = bar.get("c", 0)
+            vol    = bar.get("v", 0)
+            vwap   = bar.get("vw") or price
+
+            if not ticker or price <= 0:
+                continue
 
             # Price range filter
-            if price <= 0 or price < min_price or price > max_price:
+            if price < min_price or price > max_price:
                 continue
 
-            # Skip obvious junk: no ticker, price too low, very low volume
-            if not ticker or bar.get("v", 0) < 50_000:
+            # Minimum volume — must be tradeable
+            if vol < 200_000:
                 continue
 
-            prev      = prev_bars_map.get(ticker, {})
+            # Dollar volume cap: over $500M = large-cap institutional stock
+            # A $15 stock with 40M shares is Dominion Energy, not a momentum play
+            if price * vol > 500_000_000:
+                continue
+
+            # Skip warrants, rights, preferred: look for clean 1-5 char tickers
+            if len(ticker) > 5 or any(c in ticker for c in [".", "/"]):
+                continue
+
+            # % change vs previous close
+            prev       = prev_bars_map.get(ticker, {})
             prev_close = prev.get("c") or price
             pct_chg    = ((price - prev_close) / prev_close * 100) if prev_close else 0
-            vol_today  = bar.get("v") or 0
-            vol_prev   = prev.get("v") or 1
+
+            # Must have moved at least 2% to be relevant
+            if abs(pct_chg) < 2.0:
+                continue
+
+            vol_prev = prev.get("v") or 1
 
             results.append({
                 "ticker":       ticker,
                 "price":        round(price, 4),
                 "change_pct":   round(pct_chg, 2),
-                "volume_today": int(vol_today),
+                "volume_today": int(vol),
                 "volume_prev":  int(vol_prev),
-                "surge_ratio":  round(vol_today / vol_prev, 2) if vol_prev else 1.0,
-                "vwap":         round(bar.get("vw") or price, 4),
+                "surge_ratio":  round(vol / vol_prev, 2) if vol_prev else 1.0,
+                "vwap":         round(vwap, 4),
                 "open":         round(bar.get("o") or price, 4),
                 "high":         round(bar.get("h") or price, 4),
                 "low":          round(bar.get("l") or price, 4),
             })
 
-        # Sort by absolute % change — best movers first
-        results.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+        # Sort gainers first (like the live snapshot endpoint)
+        results.sort(key=lambda x: x["change_pct"], reverse=True)
         return results, f"historical:{trade_date}"
+
 
     # ── Ticker details ─────────────────────────────────────────────────────────
     def get_ticker_details(self, ticker: str) -> dict:
