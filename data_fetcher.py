@@ -17,10 +17,22 @@ import time
 
 
 # Tickers used as fallback when snapshot is empty (well-known momentum names).
-# These are replaced with real last-day data — only the ticker list is hardcoded.
+# Broad mix of small/mid caps across biotech, energy, tech, and retail —
+# all tend to trade in the $2-$20 range. Real bar data is fetched for each;
+# only the ticker list itself is hardcoded.
 FALLBACK_WATCHLIST = [
-    "ABIO", "SNDL", "DPRO", "AVGR", "PHIO", "VERB", "MMAT",
-    "INPX", "BIOR", "SGBX", "ILUS", "ABST",
+    # Biotech / pharma — frequent news catalysts
+    "ABIO", "PHIO", "BIOR", "AVGR", "CELZ", "TNXP", "ATOS", "OCGN",
+    "SAVA", "VISL", "ATNF", "GFAI", "CLOV", "RDBX", "MOTS",
+    # Energy / resources
+    "NRGV", "TELL", "INDO", "MFIN", "GROM", "VERB",
+    # Tech / software
+    "DPRO", "INPX", "MMAT", "SGBX", "ILUS", "ABST", "COSM",
+    # Retail / consumer
+    "SNDL", "EXPR", "BBBY", "NKLA", "RIDE", "WKHS",
+    # Recent high-volume momentum
+    "FFIE", "MULN", "AGRX", "HCDI", "BNRG", "FTFT", "NAKD",
+    "CENN", "PPSI", "TANH", "MOXC", "SMFL", "IMPP", "GTII",
 ]
 
 
@@ -329,10 +341,21 @@ class PolygonFetcher:
             }
 
         # ── Step 2: basic filters (no extra API calls) ─────────────────────────
+        is_historical = source.startswith("historical")
+
         min_avg_vol = min_avg_vol_k * 1000
-        after_vol   = [c for c in candidates if c["volume_today"] >= min_avg_vol]
-        after_surge = [c for c in after_vol   if c["surge_ratio"]  >= min_surge]
-        after_chg   = [c for c in after_surge if c["change_pct"]   >= min_chg_pct]
+
+        # Historical daily bars: volume and surge filters are not meaningful
+        # (day-over-day volume change is very different from intraday surge).
+        # Relax them automatically so we always get results for practice.
+        if is_historical:
+            after_vol   = candidates          # skip volume floor
+            after_surge = candidates          # skip surge (not intraday)
+            after_chg   = [c for c in candidates if c["change_pct"] >= min(min_chg_pct, 1.0)]
+        else:
+            after_vol   = [c for c in candidates if c["volume_today"] >= min_avg_vol]
+            after_surge = [c for c in after_vol   if c["surge_ratio"]  >= min_surge]
+            after_chg   = [c for c in after_surge if c["change_pct"]   >= min_chg_pct]
 
         diagnostic["after_volume"] = len(after_vol)
         diagnostic["after_surge"]  = len(after_surge)
@@ -379,12 +402,19 @@ class PolygonFetcher:
                 c = self.enrich_ticker(c, fetch_rsi=True)
 
             if enrich:
-                if c.get("float_m") and c["float_m"] > max_float_m:
-                    continue
-                if c.get("rsi") and (c["rsi"] < rsi_lo or c["rsi"] > rsi_hi):
-                    continue
-                if require_news and not c.get("has_news"):
-                    continue
+                if not is_historical:
+                    # Live mode: enforce all post-enrichment filters strictly
+                    if c.get("float_m") and c["float_m"] > max_float_m:
+                        continue
+                    if c.get("rsi") and (c["rsi"] < rsi_lo or c["rsi"] > rsi_hi):
+                        continue
+                    if require_news and not c.get("has_news"):
+                        continue
+                else:
+                    # Historical mode: only hard-fail on float — RSI and news
+                    # are less meaningful on weekend/closed-market data
+                    if c.get("float_m") and c["float_m"] > max_float_m * 3:
+                        continue
 
             enriched.append(c)
             if len(enriched) >= top_n:
