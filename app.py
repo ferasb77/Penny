@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 import os
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -263,6 +264,156 @@ with st.sidebar:
 
 # ─────────────────────────────────────────────
 # MAIN LAYOUT
+# ─────────────────────────────────────────────────────────────────
+# REUSABLE TICKER PANEL — chart + AI grade + trade levels
+# Called from both the Screener tab (on click) and the Chart tab
+# ─────────────────────────────────────────────────────────────────
+def render_ticker_panel(ticker: str, chart_days: int = 10, panel_key: str = "main"):
+    """Render chart, trade level calculator, news, and AI grade for a ticker."""
+    fetcher = get_fetcher()
+    agent   = get_agent()
+    if not fetcher:
+        st.error("Add your Polygon.io API key in the sidebar.")
+        return
+
+    with st.spinner(f"Loading {ticker}…"):
+        try:
+            bars_df = fetcher.get_agg_bars(ticker, days=chart_days)
+            news    = fetcher.get_news(ticker, limit=5)
+        except Exception as e:
+            st.error(f"Data error: {e}")
+            return
+
+    if bars_df.empty:
+        st.warning(f"No price data found for {ticker}.")
+        return
+
+    # ── Candlestick ────────────────────────────────────────────────
+    hod = float(bars_df["high"].max())
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=bars_df["date"],
+        open=bars_df["open"], high=bars_df["high"],
+        low=bars_df["low"],   close=bars_df["close"],
+        name=ticker,
+        increasing_line_color="#4ade80",
+        decreasing_line_color="#f87171",
+    ))
+    if "vwap" in bars_df.columns:
+        fig.add_trace(go.Scatter(
+            x=bars_df["date"], y=bars_df["vwap"],
+            name="VWAP", line=dict(color="#60a5fa", width=1.5, dash="dot")
+        ))
+    fig.add_hline(y=hod, line_color="#fbbf24", line_dash="dash",
+                  annotation_text=f"HOD ${hod:.3f}", annotation_position="top right")
+    fig.update_layout(
+        title=f"{ticker} — {chart_days}d  |  Bull flag: squeeze → pullback → new high",
+        template="plotly_dark", plot_bgcolor="#0f0f0f", paper_bgcolor="#0f0f0f",
+        height=400, xaxis_rangeslider_visible=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Volume bars ────────────────────────────────────────────────
+    vol_colors = ["#4ade80" if c >= o else "#f87171"
+                  for c, o in zip(bars_df["close"], bars_df["open"])]
+    fig_v = go.Figure(go.Bar(
+        x=bars_df["date"], y=bars_df["volume"], marker_color=vol_colors
+    ))
+    fig_v.update_layout(
+        template="plotly_dark", height=140,
+        plot_bgcolor="#0f0f0f", paper_bgcolor="#0f0f0f",
+        showlegend=False, margin=dict(t=4, b=4)
+    )
+    st.plotly_chart(fig_v, use_container_width=True)
+
+    # ── AI grade + quick analysis ──────────────────────────────────
+    if agent and st.session_state.anthropic_key:
+        col_ai1, col_ai2 = st.columns([1, 1])
+        with col_ai1:
+            if st.button(f"🤖 Grade {ticker} (5 criteria)", key=f"grade_{ticker}_{panel_key}"):
+                prompt = (
+                    f"Grade {ticker} against Ross Cameron's 5 criteria right now. "
+                    f"Fetch live data, score each criterion, give an A/B/C/D verdict, "
+                    f"and identify the bull flag entry if one is forming."
+                )
+                with st.spinner("Analyzing…"):
+                    try:
+                        reply = agent.chat(prompt)
+                        st.session_state.chat_history.append(("user", prompt))
+                        st.session_state.chat_history.append(("agent", reply))
+                        st.success("Analysis added to AI Agent tab ↗")
+                        with st.expander(f"Quick view — {ticker} analysis"):
+                            st.markdown(reply)
+                    except Exception as e:
+                        st.error(f"Agent error: {e}")
+        with col_ai2:
+            if st.button(f"📐 Calculate entry levels for {ticker}", key=f"levels_{ticker}_{panel_key}"):
+                last_price = float(bars_df["close"].iloc[-1])
+                prompt = (
+                    f"For {ticker} currently at ${last_price:.3f} with a high of day at ${hod:.3f}: "
+                    f"calculate the bull flag entry, stop loss, and 2:1 profit target. "
+                    f"Tell me exactly what price to enter, where to set my stop, "
+                    f"and confirm whether this gives me the 2:1 P/L ratio."
+                )
+                with st.spinner("Calculating…"):
+                    try:
+                        reply = agent.chat(prompt)
+                        st.session_state.chat_history.append(("user", prompt))
+                        st.session_state.chat_history.append(("agent", reply))
+                        with st.expander(f"Trade levels — {ticker}"):
+                            st.markdown(reply)
+                    except Exception as e:
+                        st.error(f"Agent error: {e}")
+
+    # ── Trade level calculator ─────────────────────────────────────
+    st.markdown("#### 📐 Trade Level Calculator")
+    last_price = float(bars_df["close"].iloc[-1])
+    c1, c2, c3 = st.columns(3)
+    entry  = c1.number_input("Entry ($)", value=last_price, format="%.4f", step=0.01, key=f"entry_{panel_key}")
+    stop   = c2.number_input("Stop ($)",  value=round(last_price * 0.95, 4), format="%.4f", step=0.01, key=f"stop_{panel_key}")
+    target = c3.number_input("Target ($)", value=round(hod, 4), format="%.4f", step=0.01, key=f"target_{panel_key}")
+
+    if entry > stop > 0 and target > entry:
+        risk   = entry - stop
+        reward = target - entry
+        pl     = reward / risk if risk > 0 else 0
+        meets  = pl >= 2.0
+        be_acc = 1 / (1 + pl) * 100 if pl > 0 else 100
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("P/L Ratio", f"{pl:.2f}:1",
+                  delta="✓ Meets 2:1" if meets else "✗ Below 2:1",
+                  delta_color="normal" if meets else "inverse")
+        m2.metric("Breakeven Accuracy", f"{be_acc:.0f}%")
+        m3.metric("Risk/share", f"${risk:.4f}", delta=f"Reward: ${reward:.4f}")
+
+        if meets:
+            st.success(f"✅ Valid setup — {pl:.1f}:1 P/L. You only need {be_acc:.0f}% accuracy to break even.")
+        else:
+            st.error(f"❌ Skip — {pl:.1f}:1 is below 2:1 minimum. Move target up or tighten stop.")
+
+        sizes = [50, 100, 250, 500, 1000, 2500, 5000]
+        st.dataframe([{
+            "Shares": s, "¼ Size": s // 4,
+            "Capital": f"${s*entry:,.0f}",
+            "Max Loss": f"${s*risk:,.2f}",
+            "Target Profit": f"${s*reward:,.2f}",
+            "If Doubled": f"${s*reward*2:,.2f}",
+        } for s in sizes], use_container_width=True, hide_index=True)
+
+    # ── News ───────────────────────────────────────────────────────
+    if news:
+        st.markdown(f"#### 📰 Catalyst ({len(news)} articles, last 48h)")
+        for a in news:
+            pub = a["publisher"]
+            date = a["published"][:10]
+            title = a["title"]
+            url = a["url"]
+            st.markdown("**" + pub + "** · " + date + "  \n[" + title + "](" + url + ")")
+    else:
+        st.warning("⚠️ No news in last 48h — Criteria #3 FAILS. Volume without catalyst = pump risk.")
+
+
 # ─────────────────────────────────────────────
 st.markdown("# 📈 Day Trade Agent")
 st.caption("Ross Cameron methodology · Polygon.io live data · Gemini AI analysis")
@@ -543,6 +694,21 @@ with tab_screener:
 
             st.divider()
 
+        # ── Inline ticker panel (shown when a ticker is clicked) ──────
+        if st.session_state.selected_ticker:
+            sel = st.session_state.selected_ticker
+            st.markdown("---")
+            col_head, col_close = st.columns([5, 1])
+            col_head.markdown(f"### 📊 {sel} — Chart & Analysis")
+            if col_close.button("✕ Close", key="close_inline"):
+                st.session_state.selected_ticker = None
+                st.rerun()
+            else:
+                chart_days_inline = st.slider(
+                    "Days of history", 3, 30, 10, key="inline_days"
+                )
+                render_ticker_panel(sel, chart_days=chart_days_inline, panel_key="inline")
+
         # ── Volume surge chart ───────────────────────────
         if "surge_ratio" in df.columns and "ticker" in df.columns:
             st.markdown("### Volume Surge vs % Change")
@@ -753,7 +919,7 @@ with tab_chat:
                                 labels = {
                                     "get_stock_details": f"🔍 Fetching details for {ticker}…",
                                     "get_stock_news": f"📰 Checking news for {ticker}…",
-                                    "compare_tickers": "⚖️ Comparing tickers…",
+                                    "compare_tickers": f"⚖️ Comparing tickers…",
                                     "get_price_bars": f"📊 Loading price bars for {ticker}…",
                                     "assess_market_temperature": "🌡️ Assessing market temperature…",
                                     "calculate_trade_levels": f"📐 Calculating trade levels for {ticker}…",
@@ -890,7 +1056,7 @@ with tab_chat:
                             labels = {
                                 "get_stock_details": f"🔍 Fetching details for {ticker}…",
                                 "get_stock_news": f"📰 Checking catalyst for {ticker}…",
-                                "compare_tickers": "⚖️ Comparing tickers…",
+                                "compare_tickers": f"⚖️ Comparing tickers…",
                                 "get_price_bars": f"📊 Loading price bars for {ticker}…",
                                 "assess_market_temperature": "🌡️ Reading market temperature…",
                                 "calculate_trade_levels": f"📐 Calculating 2:1 levels for {ticker}…",
