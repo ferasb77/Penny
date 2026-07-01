@@ -14,7 +14,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 import os
-import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -372,7 +371,7 @@ def render_ticker_panel(ticker: str, chart_days: int = 10, panel_key: str = "mai
                         st.error(f"Agent error: {e}")
 
         with col_ai3:
-            if st.button(f"📋 Generate TA Report", key=f"ta_report_{ticker}_{panel_key}",
+            if st.button("📋 Generate TA Report", key=f"ta_report_{ticker}_{panel_key}",
                          help="Generate full technical analysis + export as PDF"):
                 last_price = float(bars_df["close"].iloc[-1])
                 prompt = (
@@ -394,7 +393,6 @@ def render_ticker_panel(ticker: str, chart_days: int = 10, panel_key: str = "mai
                         st.session_state.ta_analysis_cache[ticker] = ai_text
 
                         # Score criteria for the PDF
-                        from ai_agent import TradingAgent as _TA
                         criteria_score_full = {}
                         if hasattr(agent, "_score_criteria"):
                             row_dict = {
@@ -997,7 +995,7 @@ with tab_chat:
                                 labels = {
                                     "get_stock_details": f"🔍 Fetching details for {ticker}…",
                                     "get_stock_news": f"📰 Checking news for {ticker}…",
-                                    "compare_tickers": f"⚖️ Comparing tickers…",
+                                    "compare_tickers": "⚖️ Comparing tickers…",
                                     "get_price_bars": f"📊 Loading price bars for {ticker}…",
                                     "assess_market_temperature": "🌡️ Assessing market temperature…",
                                     "calculate_trade_levels": f"📐 Calculating trade levels for {ticker}…",
@@ -1134,7 +1132,7 @@ with tab_chat:
                             labels = {
                                 "get_stock_details": f"🔍 Fetching details for {ticker}…",
                                 "get_stock_news": f"📰 Checking catalyst for {ticker}…",
-                                "compare_tickers": f"⚖️ Comparing tickers…",
+                                "compare_tickers": "⚖️ Comparing tickers…",
                                 "get_price_bars": f"📊 Loading price bars for {ticker}…",
                                 "assess_market_temperature": "🌡️ Reading market temperature…",
                                 "calculate_trade_levels": f"📐 Calculating 2:1 levels for {ticker}…",

@@ -15,7 +15,6 @@ Report sections:
 """
 
 import io
-import math
 from datetime import datetime
 
 import pandas as pd
@@ -26,9 +25,9 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, KeepTogether,
+    HRFlowable,
 )
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from reportlab.lib.enums import TA_RIGHT
 
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
@@ -131,13 +130,10 @@ def _criteria_table(criteria: dict, styles: dict) -> Table:
         partial = c.get("partial", False)
         if passed:
             status = "PASS"
-            status_color = GRADE_COLORS["A"]
         elif partial:
             status = "PARTIAL"
-            status_color = ORANGE
         else:
             status = "FAIL"
-            status_color = RED
 
         rows.append([
             label,
@@ -501,7 +497,6 @@ def generate_pdf(
             title     = a.get("title", "")
             publisher = a.get("publisher", "")
             published = a.get("published", "")[:10]
-            url       = a.get("url", "")
             story.append(Paragraph(
                 f'<b>{publisher}</b> · {published}<br/>'
                 f'<font size=8 color="#1d4ed8"><u>{title}</u></font>',
